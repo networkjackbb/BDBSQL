@@ -22,13 +22,13 @@ BDB_MySQL
  - This child class gets most of the love/attention.
  
 BDB_MSSQL
- - Microsoft SQL Server specific child class of BAB
+ - Microsoft SQL Server specific child class of BDB_Base
  - The need for this in my own personal/professional space died off many years ago, so it likely does not function, is in dire need of updating to the new sqlsrv driver, and it's main purpose at this time is as a foil to make sure that anything new that might be added overall to this library is done in as neutral way as possible from a driver-vendor perspective.
  - https://www.php.net/manual/en/book.sqlsrv.php
 
 
 BDBLogging
-BDBLogging_ErrorLog
+ BDBLogging_ErrorLog
  - These provide a surface area/interface upon which the main classes can rely on for logging purposes.
 
 
@@ -58,21 +58,21 @@ USAGE
 
 The focus of the library is:
 
-	Querying/pulling data from a table/tables, and returning the data as any of the four styles of KVHashes.
-	 - SelectOne, SelectList, SelectKeyList
-	Insert/Updating one of more records by passing along a KVHash to be updated.
-	 - Insert, Replace, Update, UpdateOne
-	Deleting one of more records by passing along essentially query parameters.
-	 - Delete, DeleteWhere, DeleteEquals
+Querying/pulling data from a table/tables, and returning the data as any of the four styles of KVHashes.
+ - SelectOne, SelectList, SelectKeyList
+Insert/Updating one of more records by passing along a KVHash to be updated.
+ - Insert, Replace, Update, UpdateOne
+Deleting one of more records by passing along essentially query parameters.
+ - Delete, DeleteWhere, DeleteEquals
 
-	These and other specific methods are built to handle those main types of operations. They take/return a standardized set of parameters focused around KVHashes.
-	 - TableName is almost always the first parameter.
-	 - Subsequent parameters can alter behavior/returned data.
+These and other specific methods are built to handle those main types of operations. They take/return a standardized set of parameters focused around KVHashes.
+ - TableName is almost always the first parameter.
+ - Subsequent parameters can alter behavior/returned data.
 
 
-	There are other methods that can be called with an actual fully constructed SQL query as the first parameter.
-	 - QueryOne, QuerySimpleResult, QueryList
-	 - Calling these will usually return a ResultSet for your own iteration/disposal.
+There are other methods that can be called with an actual fully constructed SQL query as the first parameter.
+ - QueryOne, QuerySimpleResult, QueryList
+ - Calling these will usually return a ResultSet for your own iteration/disposal.
 
 
 A note on string escaping/quoting.
