@@ -1,20 +1,20 @@
 <?php
 
 /*
-BDB vers: 1.9.7
+BDB vers: 1.9.9
 
 This class is meant to provide easy access to instantiated BDB database objects
 It does this by allowing you to declare a new child class of BDB with any aribtrary name (usually something like "PrimaryDB")
 
 		Example usage
-class ProjectDB extends BDB {}
+class PrimaryDB extends BDB {}
 
-ProjectDB::Make('MySQL', 'PrimaryDB', $CnxnParams);
+PrimaryDB::Make('MySQL', 'PrimaryDB', $CnxnParams);
 
 BDB::Make('MySQL', 'PrimaryDB', $CnxnParams);
-ProjectDB::Claim('PrimaryDB');
+PrimaryDB::Claim('PrimaryDB');
 
-$DB = ProjectDB::Get('PrimaryDB');
+$DB = BDB::Get('PrimaryDB');
 $User1Row = $DB->SelectOne('users', '', 'id = 1');
 
 $DelResult = $DB->DeleteEquals('domains', 'id', 443);
@@ -154,6 +154,10 @@ class BDB_Base
 
 	const kSQLDATETIMEFMT = BDB::kSQLDATETIMEFMT;
 
+	const kCnxnStaleTime = 10;
+
+	const kTOKEN_UTCTS = false;
+
 	protected $DBParams = array();
 
 	public $cnxnName = null;
@@ -162,6 +166,9 @@ class BDB_Base
 
 	protected $connStartTime = 0;
 	protected $numQueries = 0;
+
+	public $logDBErrors = true;
+	protected $dbErrLogFileTgt = true;
 
 	public $logQueries = false;
 	protected $QueryLogger = false;
@@ -178,7 +185,8 @@ class BDB_Base
 	
 	protected $lastQuery = '';
 	protected $lastQueryTgtTable = '';
-	protected $lastQueryTime = 0;
+	protected $lastQueryWhen = 0;		// last UTS-based when last good query ran.
+	protected $lastQueryTime = 0;		// last query took this number of microtime to complete.
 	
 	protected $Services = array();
 
@@ -231,6 +239,10 @@ class BDB_Base
 				case 'queryerroralerter':
 					$result = $this->SetQueryErrorAlerter($val);
 					if (true !== $result)		error_log("attempting to set error log in CnxnParams failed: $result\n". var_export($val, true));
+					break;
+				case 'dberroralerter':
+					$result = $this->SetDBErrorAlerter($val);
+					if (true !== $result)		error_log("attempting to set db error log in CnxnParams failed: $result\n". var_export($val, true));
 					break;
 			}
 		}
@@ -337,9 +349,15 @@ class BDB_Base
 	protected function InitQuery(&$queryPart, $Options=array())
 	{
 		$this->QueryOptions = $Options;		// save these for others to have access to.
-
+	
+## If there has been a previous query and 
+		$testTime = ($this->lastQueryWhen) ? $this->lastQueryWhen : intval($this->connStartTime);
+		if (	time() > ($testTime + self::kCnxnStaleTime) )
+		{
+			if (!$this->Ping(true))			return false;
+		}
 		
-		$logThisQuery = (substr($queryPart, 0,1) == '!');
+		$logThisQuery = ('!' == substr($queryPart, 0,1));
 		if ($logThisQuery)
 		{
 			$queryPart = substr($queryPart, 1);
@@ -355,7 +373,7 @@ class BDB_Base
 		$this->lastQuery = $this->lastQueryTgtTable = '';
 
 		return $this;
-	}
+	}		//	InitQuery
 
 
 	public function LastQuery()					{		return $this->lastQuery;		}
@@ -379,8 +397,8 @@ class BDB_Base
 ## Direct Queries can be directed to log by prefixed a '!' to the query string.
 	public function Query($query, $Options=array())
 	{
-		$this->InitQuery($query, $Options);
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
+		if (!$this->InitQuery($query, $Options))				return false;
 
 		$this->lastQuery = $query;
 		if ($this->logThisQuery)					$this->LogQuery(__function__);
@@ -390,15 +408,19 @@ class BDB_Base
 		$qtime = -microtime(true);
 		$QR = $fxn($this->lastQuery, $this->cnxnRef);
 		$this->lastQueryTime = $qtime + microtime(true);
-		if (false !== $QR)		return $QR;
+		if (false !== $QR)
+		{
+			$this->lastQueryWhen = time();
+			return $QR;
+		}
 
 		return $this->HandleQueryError(__function__, array('called_fxn' => $fxn));
 	}
 
 	public function DQuery($query, $Options=array())
 	{		// Direct Query, no fluff
-		$this->InitQuery($query, $Options);
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
+		if (!$this->InitQuery($query, $Options))				return false;
 
 		$this->lastQuery = $query;
 		if ($this->logThisQuery)					$this->LogQuery(__function__);
@@ -407,7 +429,11 @@ class BDB_Base
 		$qtime = -microtime(true);
 		$QR = $fxn($this->cnxnRef, $query);
 		$this->lastQueryTime = $qtime + microtime(true);
-		if (false !== $QR)		return $QR;
+		if (false !== $QR)
+		{
+			$this->lastQueryWhen = time();
+			return $QR;
+		}
 
 		return $this->HandleQueryError(__function__, array('called_fxn' => $fxn));
 	}
@@ -442,7 +468,6 @@ class BDB_Base
 
 
 ## ---------- Query Result/Set Processing -------------
-
 ## return format for FetchResultSet is dependent on the keyfield/namefield parameters.
 	public function FetchResultSet($QR, $keyField='', $nameField='')
 	{
@@ -611,7 +636,6 @@ class BDB_Base
 	###			a callable => the fxn is called. 
 	protected function LogQuery($fxn, $query=false)
 	{		 // Explicitly log this query as it will only be called if {logQueries} is set to true
-
 		$QLogData = array('fxn' => $fxn, );
 		$QLogData['query'] = (false === $query) ? $this->lastQuery : $query;
 		$QLogData['qtime'] = $this->lastQueryTime;
@@ -831,22 +855,38 @@ class BDB_Base
 	}
 
 
+## ------------------------------------------------------
+
 ## For errors related to events NOT query related
 ## when detected, caller can retrieve info by called GetDBError()
-	protected final function DBError($fxn, $msg=false)
+	protected final function DBError($fxn, $msg)
 	{
 		$this->ErrorInfo['fxn'] = $fxn;
-		$this->ErrorInfo['msg'] = (false === $msg) ? '' : $msg;
+		$this->ErrorInfo['cnxn_name'] = $this->cnxnName;
+		$this->ErrorInfo['host'] = $this->Host();
+		$this->ErrorInfo['user'] = $this->username;
+		$this->ErrorInfo['db'] = $this->defaultDB;
+		$this->ErrorInfo['msg'] = $msg;
+		if ($this->logDBErrors)
+		{
+			$msg = array();
+			foreach($this->ErrorInfo as $k => $v)				{		$msg[] = "$k: $v";		}
+			$this->MsgDBError(implode(' - ', $msg));
+		}
 		return false;	
 	}
 
-## Same as above but puts something into the PHP errorlog
-	protected final function DBErrorAlert($fxn, $msg=false)
+	public function SetDBErrorAlerter($dbErrLgr, $tgt=false)
 	{
-		error_log("$fxn" . ((false === $msg) ? '' : " - $msg") );
-		return $this->DBError($fxn, $msg);
+		if (is_writable($dbErrLgr))		$this->dbErrLogFileTgt = $dbErrLgr;
 	}
-
+	
+	protected function MsgDBError($msg)
+	{
+		if (true !== $this->dbErrLogFileTgt)
+			error_log($msg."\n", 3, $this->dbErrLogFileTgt);
+		else		error_log($msg);
+	}
 
 
 	protected function GetQueryBT()
@@ -942,7 +982,6 @@ class BDB_Base
 	public function GetDBError()
 	{
 		$ErrInfo = $this->ErrorInfo;
-		$ErrInfo['name'] = $this->name;
 		$ErrInfo['cnxn_start_ts'] = $this->connStartTime;
 		$ErrInfo['num_queries'] = $this->numQueries;
 		
@@ -989,6 +1028,10 @@ class BDB_MySQL extends BDB_Base
 {
 	const kEngineTypeID = 1;
 	const kEngineTypeName = 'MySQL';
+
+	const kCnxnStaleTime = 5;
+
+	const kTOKEN_UTCTS = 'UTC_TIMESTAMP()';
 
 	protected $host = null;
 	protected $port = null;
@@ -1167,7 +1210,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 
 		if( !empty($this->defaultDB)	&& (false === $CnxnObj->select_db($this->defaultDB) ) )
 		{	// Error that we couldn't select the db requested
-			return $this->DBError(__function__, $this->name .": Failed to select Database: ". $this->defaultDB);
+			return $this->DBError(__function__, $this->cnxnName .": Failed to select Database: ". $this->defaultDB);
 		}
 
 		if (!empty($charsetStmt))
@@ -1201,7 +1244,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		$connectResult = $this->Connect($this->CnxnOpts);
 		if (false === $connectResult)
 		{
-			return $this->DBErrorAlert(__function__, "DBPing Reconnect Failed");
+			return $this->DBError(__function__, "DBPing {$this->cnxnName} Reconnect Failed");
 		}
 		return true;
 	}
@@ -1222,7 +1265,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 
 	public function QuerySimpleResult($query, $Options=array())
 	{
-		$this->InitQuery($query, $Options);
+		if (!$this->InitQuery($query, $Options))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 		if (empty($query))						return $this->HandleQueryParamsError(__function__, 'empty query');
 
@@ -1236,7 +1279,8 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		{
 			return $this->HandleQueryError(__function__);
 		}
-
+		$this->lastQueryWhen = time();
+		
 		if (!$QR->num_rows)
 		{
 			$this->HandleQueryError(__function__, array('msg'=>'no rows in result set') );
@@ -1261,7 +1305,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 			$colList = '';
 		}
 
-		$this->InitQuery($tableName);
+		if (!$this->InitQuery($tableName))				return false;
 
 		if (empty($colList)) 			$colList = "*";
 		
@@ -1280,6 +1324,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		{
 			return $this->HandleQueryError(__function__);
 		}
+		$this->lastQueryWhen = time();
 
 		$RowData = $QR->fetch_assoc();
 		$QR->free();
@@ -1313,7 +1358,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 
 	public function SelectList($tableName, $colList, $keyField, $nameField, $where, $orderBy='', $limitInput=0)
 	{
-		$this->InitQuery($tableName);
+		if (!$this->InitQuery($tableName))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 	
 		if (empty($colList)) 	$colList = "*";
@@ -1333,6 +1378,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		{
 			return $this->HandleQueryError(__function__);
 		}
+		$this->lastQueryWhen = time();
 
 		return $this->FetchResultSetFree($QR, $keyField, $nameField);
 	}
@@ -1341,7 +1387,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 
 	public function QueryOne($query, $Options=array())
 	{
-		$this->InitQuery($query, $Options);
+		if (!$this->InitQuery($query, $Options))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 
 		$this->lastQuery = $query;
@@ -1354,6 +1400,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		{
 			return $this->HandleQueryError(__function__);
 		}
+		$this->lastQueryWhen = time();
 
 		$RowData = $QR->fetch_assoc();
 		$QR->free();
@@ -1364,7 +1411,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 
 	public function QueryList($query, $keyField='', $nameField='')
 	{
-		$this->InitQuery($query);
+		if (!$this->InitQuery($query))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 
 		$this->lastQuery = $query;
@@ -1377,6 +1424,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		{
 			return $this->HandleQueryError(__function__);
 		}
+		$this->lastQueryWhen = time();
 
 		return $this->FetchResultSetFree($QR, $keyField, $nameField);
 	}
@@ -1396,7 +1444,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 			$Options = array();
 			if (stristr($optVal, 'ignore'))			$Options['IgnoreErrs'] = true;
 		}
-		$this->InitQuery($tableName, $Options);
+		if (!$this->InitQuery($tableName, $Options))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 
 		$priorityStr = $this->MySQL_PriorityString($Options);
@@ -1424,6 +1472,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		}
 		else
 		{
+			$this->lastQueryWhen = time();
 			$Result = array('Status' => true, 'Query' => $this->lastQuery, 'QueryTime' => $this->lastQueryTime, );
 			$Result['NumRows'] = $numAffRows = $this->cnxnRef->affected_rows;
 			if ($numAffRows)			$Result['NewRecID'] = ($this->cnxnRef->insert_id)+0;
@@ -1435,12 +1484,10 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 
 
 
-
-
 	public function Replace($tableName, $DataRecord, $Options=array())
 	{
-		if (!is_array($Options))		$Options = array($Options => '');
-		$this->InitQuery($tableName, $Options);
+		if ( !is_array($Options))			$Options = empty($Options) ? array() : array($Options => '');
+		if (!$this->InitQuery($tableName, $Options))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 
 		$this->lastQueryTgtTable = $tableName;
@@ -1472,6 +1519,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		}
 		else
 		{
+			$this->lastQueryWhen = time();
 			$Result = array('Status' => true, 'Query' => $this->lastQuery, 'QueryTime' => $this->lastQueryTime, );
 			$Result['NumRows'] = $numAffRows = $this->cnxnRef->affected_rows+0;
 			if (1 == $numAffRows)			$Result['NewRecID'] = $this->cnxnRef->insert_id;
@@ -1489,7 +1537,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		{		// assume a scalar passed is simply a LIMIT value;
 			$Options = array('limit' => ($Options+0));
 		}
-		$this->InitQuery($tableName, $Options);
+		if (!$this->InitQuery($tableName, $Options))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 		if (empty($DataRecord))
 		{
@@ -1527,6 +1575,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		}
 		else
 		{
+			$this->lastQueryWhen = time();
 			$Result = array('Status' => true, 'Query' => $this->lastQuery, 'QueryTime' => $this->lastQueryTime, );
 			$Result['NumRows'] = $numAffRows = $this->cnxnRef->affected_rows;
 		}
@@ -1554,7 +1603,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 	public function DeleteWhere($tableName, $where, $limitNum=0, $Options=array())
 	{
 		if (!is_array($Options))	$Options = array();
-		$this->InitQuery($tableName, $Options);
+		if (!$this->InitQuery($tableName, $Options))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 
 		$this->lastQueryTgtTable = $tableName;
@@ -1575,6 +1624,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		}
 		else
 		{
+			$this->lastQueryWhen = time();
 			$Result = array('Status' => true, 'Query' => $this->lastQuery, 'QueryTime' => $this->lastQueryTime, );
 			$Result['NumRows'] = $numAffRows = $this->cnxnRef->affected_rows;
 		}
@@ -1590,7 +1640,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 	public function Upsert($tableName, $DataRecord, $Options=array())
 	{
 		return false;
-		$this->InitQuery($tableName, $Options);
+		if (!$this->InitQuery($tableName, $Options))				return false;
 
 		$testKeyField = $Options['SafeReplace'];
 		$testKeyFieldLiteral = '#'.$testKeyField;
@@ -1645,6 +1695,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		}
 		else
 		{
+			$this->lastQueryWhen = time();
 			$Result = array('Status' => true, 'Query' => $this->lastQuery, 'QueryTime' => $this->lastQueryTime, );
 			$Result['NumRows'] = $numRows = $this->cnxnRef->affected_rows;
 			$Result['NewRecID'] = NULL;
@@ -1659,10 +1710,10 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 
 
 ### -----------------
-
+#MYSQLI_USE_RESULT
 	public function Query($query, $Options=array())
 	{
-		$this->InitQuery($query, $Options);
+		if (!$this->InitQuery($query, $Options))				return false;
 		if (is_null($this->cnxnRef))				return $this->DBError(__function__, 'No db connection');
 
 		$this->lastQuery = $query;
@@ -1674,6 +1725,12 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		if (false === $QR)
 		{
 			return $this->HandleQueryError(__function__);
+		}
+		$this->lastQueryWhen = time();
+
+		if (array_key_exists('unbuffered', $Options) && (true == $Options['unbuffered']) )
+		{
+			return $this->cnxnRef->use_result();
 		}
 
 		if ($this->cnxnRef->field_count)
@@ -1786,7 +1843,7 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		$errNum = $this->ErrorNum();
 		if (2006 == $errNum)		##	MySQL server has gone away
 		{		## this is not a query error.
-			return $this->DBError(__function__, 'MySQL server has gone away');
+			return $this->DBError($fxn, 'MySQL server has gone away');
 		}
 
 		$this->QErrData['state'] = $this->cnxnRef->sqlstate;
@@ -1911,7 +1968,7 @@ class BDB_MSSQL extends BDB_Base
 
 	public function LastInsertID($table)
 	{
-		if (empty($table))		return $this->DBErrorAlert(__function__, 'Request on Last Insert ID for blank table name');
+		if (empty($table))		return $this->DBError(__function__, 'Request on Last Insert ID for blank table name');
 		return $this->SelectCell("SELECT ident_current('$table')");
 	}
 
@@ -1974,6 +2031,16 @@ class BDBLogging_ErrorLog extends BDBLogging
 ## Change Log
 
 
+ v1.9.9
+ 	- added kTOKEN_UTCTS as a class constant. for MySQL this is set to: "UTC_TIMESTAMP()"
+
+
+ v1.9.8
+ 	- cleaned up usage notes at top: PrimaryDB -> ProjectDB
+ 	- A plain MySQL Query can force the usage of the use_result() function by specifying a "unbuffered" option. This changes how data is retrieved/cached.
+ 	- better handling of the Options 3rd param for MySQL::Replace()
+ 	- Got rid of DBErrorAlert and made DBError log to error_log be default but it can be disabled/redirected.
+ 	- added $lastQueryTime to track the last time a good query returned. Using it to Ping/Reconnect.
 
 
  v1.9.7
