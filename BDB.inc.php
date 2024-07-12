@@ -1,7 +1,7 @@
 <?php
 
 /*
-BDB vers: 1.9.9
+BDB vers: 1.9.10
 
 This class is meant to provide easy access to instantiated BDB database objects
 It does this by allowing you to declare a new child class of BDB with any aribtrary name (usually something like "PrimaryDB")
@@ -21,6 +21,7 @@ $DelResult = $DB->DeleteEquals('domains', 'id', 443);
 
 
 TODO
+- Add Postgres.
 - Allow more values to be passed in that are pushed in through mysqli->options();
 - add method to get current version of particular engines library.
 - Event Logging - connect, query, disconnect, etc....
@@ -193,6 +194,7 @@ class BDB_Base
 	protected $defaultBoolTest = 'AND';
 
 	protected static $fxnNameDisconnect = false;
+	protected static $fxnNameSelectDB = false;
 	protected static $fxnNameEscapeString = false;
 	protected static $fxnNameFreeResult = false;
 	protected static $fxnNameQuery = 'null_op';
@@ -270,6 +272,14 @@ class BDB_Base
 		return (!is_null($this->cnxnRef));
 	}
 
+
+	public function SelectDB($dbName)
+	{
+		$fxn = static::$fxnNameSelectDB;
+		return $fxn($this->cnxnRef, $dbName);
+	}
+
+
 	public function EscapeString($data)		{		return $data; }
 
 	public function Quote($data)
@@ -292,8 +302,6 @@ class BDB_Base
 		}
 		return $NewData;
 	}
-
-
 
 
 
@@ -848,7 +856,11 @@ class BDB_Base
 			error_log($errMsg);
 		else
 		{
-			$when = DateTime::createFromFormat('U.u', $this->QErrData['when_ut'])->format('Y-m-d h:i:s.v');
+			$when_ut_str = strval($this->QErrData['when_ut']);
+#			error_log('DateTime::createFromFormat: '. $this->QErrData['when_ut']);
+			$WhenDTObj = DateTime::createFromFormat('U.u', $when_ut_str);
+			if (false === $WhenDTObj)				$WhenDTObj = DateTime::createFromFormat('U', $when_ut_str);
+			$when = $WhenDTObj->format('Y-m-d h:i:s.v');
 			error_log($when .' '. $errMsg ."\n", 3, $this->qErrLogFileTgt);
 		}
 		return false;
@@ -1053,6 +1065,7 @@ class BDB_MySQL extends BDB_Base
 	protected static $DriverObj = false;
 	protected static $reportModeDefault = false;
 
+	protected static $fxnNameSelectDB = 'mysqli_select_db';		//	SelectDB
 	protected static $fxnNameDisconnect = 'mysqli_close';
 	protected static $fxnNameFreeResult = 'mysqli_free_result';
 	protected static $fxnNameFetchAssoc = 'mysqli_fetch_assoc';
@@ -1169,18 +1182,18 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 
 // the charset parameter can be passed as $charset or array($charset, $collation)
 // different methods will require different setup operations.
-		$charsetStmt = '';
+		$charsetStmt = '';		##	character_set_client	character_set_connection	character_set_results	collation_connection
 		if (false !== $this->charset)
 		{
-			$collation = '';
 			if (is_array($this->charset))
 			{
 				list($charset, $collation) = $this->charset;
+				$charsetStmt = "SET NAMES '$charset' COLLATE '$collation';";
 			}
-			$mysqli->set_charset($charset);
-			if (!empty($collation))
+			else
 			{
-				$charsetStmt = "SET NAMES '$charset' COLLATE '$collation'";
+				$charset = $this->charset;
+				$CnxnObj->set_charset($charset);
 			}
 		}
 
@@ -1208,15 +1221,13 @@ TODO - 	'charset_query' => "SET NAMES 'utf8'",
 		$this->connStartTime = microtime(true);
 		$this->threadID = $CnxnObj->thread_id;
 
-		if( !empty($this->defaultDB)	&& (false === $CnxnObj->select_db($this->defaultDB) ) )
+		if( !empty($this->defaultDB)	&& (false === $this->SelectDB($this->defaultDB) ) )
 		{	// Error that we couldn't select the db requested
 			return $this->DBError(__function__, $this->cnxnName .": Failed to select Database: ". $this->defaultDB);
 		}
 
-		if (!empty($charsetStmt))
-		{
-			
-		}
+		## We have a connection. Perform any post connect ops as directed.
+		if (!empty($charsetStmt))				$CnxnObj->query($charsetStmt);
 
 		return true;
 	}		//	Connect
@@ -1934,7 +1945,7 @@ class BDB_MSSQL extends BDB_Base
 		$this->connStartTime = microtime(true);
 		$this->useAssoc = defined('MSSQL_ASSOC');
 
-		if( !empty($this->defaultDB)	&& (false === mssql_select_db($this->defaultDB, $this->cnxnRef) ) )
+		if( !empty($this->defaultDB)	&& (false === $this->SelectDB($this->defaultDB) ) )
 		{	// Error that we couldn't select the db requested
 			return $this->DBError(__function__, "Failed to select Database: $dbName");
 		}
@@ -1942,6 +1953,10 @@ class BDB_MSSQL extends BDB_Base
 		return true;
 	}
 
+	public function SelectDB($dbName)		// overridden from base since the params are switched.
+	{
+		return mssql_select_db($dbName, $this->cnxnRef);
+	}
 
 	public function EscapeString($data)
 	{
@@ -2031,8 +2046,16 @@ class BDBLogging_ErrorLog extends BDBLogging
 ## Change Log
 
 
+ v1.9.10
+ 	- in QueryErrorAlerter_ErrorLog, use the 'when_ut' (When MicroTime) value for the output of the date/time/msecs for the error log entry.
+ 	- fixed bug in calling mysqli->set_charset() in MySQLi->Connect()
+ 	- finally implemented setting of the charset and collation values from Config values. To set both inside the initial connection process, 
+ 			present a Pair (charset, collation) for the "Charset" config variable
+
+
  v1.9.9
  	- added kTOKEN_UTCTS as a class constant. for MySQL this is set to: "UTC_TIMESTAMP()"
+ 	- added SelectDB() method.
 
 
  v1.9.8
